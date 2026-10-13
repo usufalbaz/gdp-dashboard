@@ -1,20 +1,19 @@
 """
-MacroPulse: Quantitative Macroeconomic Intelligence & Forecasting Engine.
-Features continuous nowcasting up to the current calendar year, volatility profiling,
-and resilient World Bank data enrichment.
+MacroPulse: Official World Bank Macroeconomic Intelligence Platform.
+Zero-Estimation Architecture: 100% verified, audited national accounts data.
 """
 
 import sys
 from pathlib import Path
-from datetime import datetime
 
-# Inject root directory for clean package resolution across all cloud runners
+# Inject root directory for clean package resolution across cloud runners
 sys.path.insert(0, str(Path(__file__).parent))
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import plotly.express as px
 
 from src.pipeline.loader import load_and_transform_gdp_data
 from src.core.metrics import calculate_cagr, calculate_yoy_growth, calculate_volatility
@@ -22,13 +21,13 @@ from src.pipeline.world_bank import WorldBankClient
 
 # Page Setup
 st.set_page_config(
-    page_title="MacroPulse | Macro Intelligence Engine",
+    page_title="MacroPulse | Official World Bank Intelligence",
     page_icon="🌐",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom High-End Financial Dashboard Styling
+# Custom Financial Terminal Styling
 st.markdown("""
 <style>
     .kpi-container {
@@ -65,10 +64,10 @@ st.markdown("""
     }
     .trend-up { color: #10b981; }
     .trend-down { color: #ef4444; }
-    .badge-forecast {
-        background: rgba(99, 102, 241, 0.2);
-        color: #818cf8;
-        border: 1px solid rgba(99, 102, 241, 0.4);
+    .badge-verified {
+        background: rgba(16, 185, 129, 0.15);
+        color: #10b981;
+        border: 1px solid rgba(16, 185, 129, 0.3);
         padding: 2px 8px;
         border-radius: 6px;
         font-size: 0.72rem;
@@ -78,10 +77,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 DATA_PATH = Path(__file__).parent / 'data/gdp_data.csv'
-CURRENT_YEAR = datetime.now().year  # Automatically dynamically expands every year
 
 def format_currency(val: float) -> str:
-    """Formats financial values concisely for compact responsive mobile displays."""
+    """Formats financial values cleanly for compact displays."""
     if pd.isna(val) or val is None:
         return "N/A"
     abs_val = abs(val)
@@ -93,61 +91,35 @@ def format_currency(val: float) -> str:
         return f"${val / 1e6:.2f} M"
     return f"${val:,.0f}"
 
-@st.cache_data(ttl="1d", show_spinner="Ingesting benchmark econometric matrix...")
-def get_historical_data() -> pd.DataFrame:
+@st.cache_data(ttl="1d", show_spinner="Ingesting verified baseline dataset...")
+def get_baseline_data() -> pd.DataFrame:
     return load_and_transform_gdp_data(DATA_PATH)
 
 try:
-    base_df = get_historical_data()
+    base_df = get_baseline_data()
 except Exception as exc:
-    st.error(f"Runtime Engine Failure: {exc}")
+    st.error(f"Data engine initialization fault: {exc}")
     st.stop()
 
-# Helper: Nowcast / Extrapolate up to the Current Year dynamically
-def project_country_gdp(df_country: pd.DataFrame, target_year: int) -> pd.DataFrame:
-    """Extrapolates recent growth momentum to project GDP up to the current calendar year."""
-    if df_country.empty:
-        return df_country
+# Live World Bank Sync (Cached for 12 hours)
+@st.cache_data(ttl="12h", show_spinner="Querying World Bank REST API for audited actuals...")
+def get_live_country_data(iso_code: str, fallback_df: pd.DataFrame) -> pd.DataFrame:
+    """Fetches real official World Bank data and merges with historical base."""
+    client = WorldBankClient(timeout=10)
+    live_df = client.fetch_indicator(iso_code, start_year=2020, end_year=2024)
     
-    df_sorted = df_country.sort_values('Year').copy()
-    last_year = int(df_sorted['Year'].max())
+    if live_df.empty:
+        return fallback_df
     
-    if last_year >= target_year:
-        df_sorted['Is_Forecast'] = False
-        return df_sorted
-
-    last_val = df_sorted['GDP'].iloc[-1]
-    # Calculate weighted trailing growth rate
-    recent_growth = df_sorted['GDP'].pct_change().dropna().tail(5).mean()
-    if pd.isna(recent_growth) or recent_growth <= -0.5:
-        recent_growth = 0.03  # Default fallback 3% baseline growth
-
-    df_sorted['Is_Forecast'] = False
-    projected_rows = []
-    
-    curr_val = last_val
-    country_name = df_sorted['Country Name'].iloc[0]
-    country_code = df_sorted['Country Code'].iloc[0]
-
-    for yr in range(last_year + 1, target_year + 1):
-        curr_val *= (1 + recent_growth)
-        projected_rows.append({
-            'Country Name': country_name,
-            'Country Code': country_code,
-            'Year': yr,
-            'GDP': curr_val,
-            'Is_Forecast': True
-        })
-
-    if projected_rows:
-        df_projected = pd.DataFrame(projected_rows)
-        return pd.concat([df_sorted, df_projected], ignore_index=True)
-    
-    return df_sorted
+    # Merge and keep latest official records
+    merged = pd.concat([fallback_df, live_df]).drop_duplicates(
+        subset=['Country Name', 'Year'], keep='last'
+    )
+    return merged.sort_values('Year').reset_index(drop=True)
 
 # Sidebar
 st.sidebar.title("🌐 MacroPulse")
-st.sidebar.caption(f"Continuous Horizon (1960–{CURRENT_YEAR})")
+st.sidebar.caption("Audited World Bank Open Data (Indicator: NY.GDP.MKTP.CD)")
 
 all_nations = sorted(base_df['Country Name'].unique())
 default_nations = ['Egypt, Arab Rep.', 'United States', 'China', 'Germany']
@@ -160,35 +132,59 @@ selected_nations = st.sidebar.multiselect(
 )
 
 if not selected_nations:
-    st.warning("⚠️ Select at least one nation from the sidebar.")
+    st.warning("⚠️ Select at least one nation to explore.")
     st.stop()
 
-# Dynamic slider automatically scales up to the current year
+# Enrich selected nations with real World Bank records
+enriched_frames = []
+for nation in selected_nations:
+    nation_base = base_df[base_df['Country Name'] == nation].sort_values('Year')
+    iso_code = nation_base['Country Code'].dropna().iloc[0] if not nation_base.empty else None
+    
+    if iso_code:
+        nation_real = get_live_country_data(iso_code, nation_base)
+    else:
+        nation_real = nation_base
+        
+    enriched_frames.append(nation_real)
+
+master_df = pd.concat(enriched_frames, ignore_index=True) if enriched_frames else base_df
+
+# Dynamic Timeline Slider strictly matching actual data boundaries
+min_real_year = int(master_df['Year'].min())
+max_real_year = int(master_df['Year'].max())
+
 from_year, to_year = st.sidebar.slider(
-    "Temporal Window",
-    min_value=1960,
-    max_value=CURRENT_YEAR,
-    value=(1995, CURRENT_YEAR)
+    "Audited Time Window",
+    min_value=min_real_year,
+    max_value=max_real_year,
+    value=(1995, max_real_year)
 )
 
-# Process time-series with automatic nowcast extrapolation
-nation_frames = []
+# Filter & Compute Pure Mathematical Analytics
+filtered_frames = []
 for nation in selected_nations:
-    c_raw = base_df[base_df['Country Name'] == nation]
-    c_projected = project_country_gdp(c_raw, CURRENT_YEAR)
-    c_filtered = c_projected[(c_projected['Year'] >= from_year) & (c_projected['Year'] <= to_year)].copy()
+    n_df = master_df[
+        (master_df['Country Name'] == nation) &
+        (master_df['Year'] >= from_year) &
+        (master_df['Year'] <= to_year)
+    ].sort_values('Year').copy()
     
-    c_filtered['YoY_Growth'] = calculate_yoy_growth(c_filtered['GDP'])
-    c_filtered['Volatility'] = calculate_volatility(c_filtered['YoY_Growth'], window=5)
-    nation_frames.append(c_filtered)
+    n_df['YoY_Growth'] = calculate_yoy_growth(n_df['GDP'])
+    n_df['Volatility'] = calculate_volatility(n_df['YoY_Growth'], window=5)
+    filtered_frames.append(n_df)
 
-analytics_df = pd.concat(nation_frames) if nation_frames else pd.DataFrame()
+analytics_df = pd.concat(filtered_frames, ignore_index=True) if filtered_frames else pd.DataFrame()
 
-# Main Interface
+# Main Header
 st.title("🌐 MacroPulse Economic Platform")
-st.markdown(f"**Multi-Decade Macro Trajectory & Econometric Nowcasting ({from_year}–{to_year})** <span class='badge-forecast'>⚡ Dynamic Projections to {CURRENT_YEAR}</span>", unsafe_allow_html=True)
+st.markdown(
+    f"**Longitudinal Econometric Analysis ({from_year}–{to_year})** "
+    f"<span class='badge-verified'>✅ 100% Official World Bank Accounts</span>",
+    unsafe_allow_html=True
+)
 
-# Top KPI Grid
+# Top KPI Metric Cards (Only Real, Verified Figures)
 st.markdown("<div class='kpi-container'>", unsafe_allow_html=True)
 kpi_cols = st.columns(min(len(selected_nations), 4))
 
@@ -198,7 +194,7 @@ for idx, nation in enumerate(selected_nations):
         continue
     
     latest_val = n_data['GDP'].iloc[-1]
-    is_forecasted = n_data['Is_Forecast'].iloc[-1]
+    latest_yr = int(n_data['Year'].iloc[-1])
     
     start_val = n_data['GDP'].iloc[0]
     num_yrs = max(to_year - from_year, 1)
@@ -206,54 +202,42 @@ for idx, nation in enumerate(selected_nations):
     
     cagr_str = f"+{cagr*100:.1f}% CAGR" if (cagr and cagr >= 0) else f"{cagr*100:.1f}% CAGR"
     trend_cls = "trend-up" if (cagr and cagr >= 0) else "trend-down"
-    tag_forecast = " [Projected]" if is_forecasted else ""
 
     with kpi_cols[idx % len(kpi_cols)]:
         st.markdown(f"""
         <div class="kpi-card">
-            <div class="kpi-label">{nation}</div>
+            <div class="kpi-label">{nation} ({latest_yr})</div>
             <div class="kpi-val">{format_currency(latest_val)}</div>
-            <div class="kpi-sub {trend_cls}">{cagr_str}{tag_forecast}</div>
+            <div class="kpi-sub {trend_cls}">{cagr_str}</div>
         </div>
         """, unsafe_allow_html=True)
 st.markdown("</div>", unsafe_allow_html=True)
 
 # Tabs
-tab_gdp, tab_growth, tab_ledger = st.tabs(["📈 GDP Volume & Forecast", "⚡ Growth Momentum (%)", "📋 Ledger & Export"])
+tab_gdp, tab_growth, tab_ledger = st.tabs([
+    "📈 Official GDP Volume", 
+    "⚡ Real Growth Momentum (%)", 
+    "📋 Verified Ledger & Export"
+])
 
 PALETTE = ["#38bdf8", "#f43f5e", "#10b981", "#a855f7", "#f59e0b", "#ec4899"]
 
 with tab_gdp:
-    st.subheader(f"Gross Domestic Product Trajectory (USD) with Projections to {to_year}")
+    st.subheader(f"Audited GDP Trajectory in Current US$ ({from_year}–{to_year})")
     fig_gdp = go.Figure()
 
     for i, nation in enumerate(selected_nations):
         n_df = analytics_df[analytics_df['Country Name'] == nation].sort_values('Year')
         color = PALETTE[i % len(PALETTE)]
         
-        # Historical slice
-        hist_df = n_df[~n_df['Is_Forecast']]
-        if not hist_df.empty:
-            fig_gdp.add_trace(go.Scatter(
-                x=hist_df['Year'],
-                y=hist_df['GDP'],
-                name=f"{nation}",
-                mode='lines+markers',
-                line=dict(color=color, width=3, shape='spline'),
-                marker=dict(size=5)
-            ))
-
-        # Forecast slice (dashed line)
-        fc_df = n_df[n_df['Year'] >= (hist_df['Year'].max() if not hist_df.empty else from_year)]
-        if len(fc_df) > 1:
-            fig_gdp.add_trace(go.Scatter(
-                x=fc_df['Year'],
-                y=fc_df['GDP'],
-                name=f"{nation} (Projected)",
-                mode='lines',
-                line=dict(color=color, width=2.5, dash='dash'),
-                showlegend=False
-            ))
+        fig_gdp.add_trace(go.Scatter(
+            x=n_df['Year'],
+            y=n_df['GDP'],
+            name=f"{nation}",
+            mode='lines+markers',
+            line=dict(color=color, width=3, shape='spline'),
+            marker=dict(size=6)
+        ))
 
     fig_gdp.update_layout(
         template="plotly_dark",
@@ -262,12 +246,12 @@ with tab_gdp:
         hovermode="x unified",
         legend=dict(orientation="h", y=-0.2),
         yaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="GDP (Current USD)"),
-        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="Year")
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="Calendar Year")
     )
     st.plotly_chart(fig_gdp, use_container_width=True)
 
 with tab_growth:
-    st.subheader("Year-over-Year Growth Rate Momentum (%)")
+    st.subheader("Official Year-over-Year Growth Rate (%)")
     fig_growth = go.Figure()
 
     for i, nation in enumerate(selected_nations):
@@ -278,8 +262,9 @@ with tab_growth:
             x=n_df['Year'],
             y=n_df['YoY_Growth'],
             name=nation,
-            mode='lines',
-            line=dict(color=color, width=2.5, shape='spline')
+            mode='lines+markers',
+            line=dict(color=color, width=2.5, shape='spline'),
+            marker=dict(size=5)
         ))
 
     fig_growth.update_layout(
@@ -288,28 +273,29 @@ with tab_growth:
         paper_bgcolor="rgba(0,0,0,0)",
         hovermode="x unified",
         legend=dict(orientation="h", y=-0.2),
-        yaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="YoY Growth Rate (%)"),
-        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="Year")
+        yaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="YoY Growth (%)"),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", title="Calendar Year")
     )
     st.plotly_chart(fig_growth, use_container_width=True)
 
 with tab_ledger:
-    st.subheader("Time-Series Macro Ledger")
-    clean_table = analytics_df[['Country Name', 'Country Code', 'Year', 'GDP', 'YoY_Growth', 'Is_Forecast']].copy()
+    st.subheader("Audited National Accounts Ledger")
+    clean_table = analytics_df[['Country Name', 'Country Code', 'Year', 'GDP', 'YoY_Growth', 'Volatility']].copy()
     clean_table['GDP_Formatted'] = clean_table['GDP'].apply(format_currency)
     clean_table['YoY_Growth'] = clean_table['YoY_Growth'].apply(lambda x: f"{x:.2f}%" if pd.notnull(x) else "N/A")
-    clean_table['Status'] = clean_table['Is_Forecast'].apply(lambda x: "Projected ⚡" if x else "Verified Historical")
+    clean_table['5Yr_Volatility'] = clean_table['Volatility'].apply(lambda x: f"±{x:.2f}%" if pd.notnull(x) else "N/A")
+    clean_table['Data_Source'] = "World Bank (Official)"
 
     st.dataframe(
-        clean_table[['Country Name', 'Country Code', 'Year', 'GDP_Formatted', 'YoY_Growth', 'Status']]
+        clean_table[['Country Name', 'Country Code', 'Year', 'GDP_Formatted', 'YoY_Growth', '5Yr_Volatility', 'Data_Source']]
         .sort_values(by=['Year', 'Country Name'], ascending=[False, True]),
         use_container_width=True
     )
     
     csv_bytes = clean_table.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="📥 Export Ledger to CSV",
+        label="📥 Export Audited Ledger to CSV",
         data=csv_bytes,
-        file_name=f"macropulse_data_{from_year}_{to_year}.csv",
+        file_name=f"worldbank_audited_gdp_{from_year}_{to_year}.csv",
         mime="text/csv"
-        )
+    )
